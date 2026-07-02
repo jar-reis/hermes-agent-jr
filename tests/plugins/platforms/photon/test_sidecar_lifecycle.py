@@ -75,6 +75,119 @@ async def test_reap_noop_when_port_free(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_reap_kills_verified_orphan(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _make_adapter(monkeypatch)
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _ProbeClient)
+    monkeypatch.setattr(adapter, "_find_listener_pids", lambda port: [4242])
+    monkeypatch.setattr(adapter, "_pid_is_sidecar", lambda pid: True)
+    # Dies promptly on SIGTERM — no escalation expected.
+    monkeypatch.setattr(adapter, "_pid_alive", lambda pid: False)
+    kills = _capture_kills(monkeypatch)
+
+    await adapter._reap_stale_sidecar()
+
+    assert kills == [(4242, photon_adapter.signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_reap_escalates_to_sigkill(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _make_adapter(monkeypatch)
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _ProbeClient)
+    monkeypatch.setattr(adapter, "_find_listener_pids", lambda port: [4242])
+    monkeypatch.setattr(adapter, "_pid_is_sidecar", lambda pid: True)
+    monkeypatch.setattr(adapter, "_pid_alive", lambda pid: True)  # ignores TERM
+    # No clock fakery (logging also calls time.time, which makes a fake clock
+    # fragile) — this test rides out the real 3s SIGTERM grace window.
+    kills = _capture_kills(monkeypatch)
+
+    await adapter._reap_stale_sidecar()
+
+    assert (4242, photon_adapter.signal.SIGTERM) in kills
+    assert (4242, photon_adapter.signal.SIGKILL) in kills
+
+
+@pytest.mark.asyncio
+async def test_reap_raises_for_foreign_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never signal a process whose command line isn't our sidecar."""
+    adapter = _make_adapter(monkeypatch)
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _ProbeClient)
+    monkeypatch.setattr(adapter, "_find_listener_pids", lambda port: [777])
+    monkeypatch.setattr(adapter, "_pid_is_sidecar", lambda pid: False)
+    kills = _capture_kills(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="in use by another process"):
+        await adapter._reap_stale_sidecar()
+
+    assert kills == []
+
+
+@pytest.mark.asyncio
+async def test_reap_raises_for_owned_sidecar_with_live_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never kill a sidecar whose parent is alive (another gateway owns it).
+
+    This is the reap-war guard: two gateway instances sharing a port would
+    otherwise keep killing each other's sidecar on every reconnect.
+    """
+    adapter = _make_adapter(monkeypatch)
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _ProbeClient)
+    monkeypatch.setattr(adapter, "_find_listener_pids", lambda port: [4242])
+    monkeypatch.setattr(adapter, "_pid_is_sidecar", lambda pid: True)
+    monkeypatch.setattr(adapter, "_sidecar_parent_pid", lambda pid: 5000)
+    monkeypatch.setattr(adapter, "_pid_alive", lambda pid: True)  # parent alive
+    kills = _capture_kills(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="parent is still alive"):
+        await adapter._reap_stale_sidecar()
+
+    assert kills == []
+
+
+@pytest.mark.asyncio
+async def test_reap_kills_orphaned_sidecar_with_dead_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill a sidecar whose parent is dead (a true orphan)."""
+    adapter = _make_adapter(monkeypatch)
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _ProbeClient)
+    monkeypatch.setattr(adapter, "_find_listener_pids", lambda port: [4242])
+    monkeypatch.setattr(adapter, "_pid_is_sidecar", lambda pid: True)
+    monkeypatch.setattr(adapter, "_sidecar_parent_pid", lambda pid: 5000)
+    # Sidecar alive, but parent dead → true orphan
+    monkeypatch.setattr(
+        adapter, "_pid_alive",
+        lambda pid: False if pid == 5000 else False,  # parent dead, sidecar dies on TERM
+    )
+    kills = _capture_kills(monkeypatch)
+
+    await adapter._reap_stale_sidecar()
+
+    assert kills == [(4242, photon_adapter.signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_reap_kills_reparented_sidecar_with_ppid_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sidecar reparented to init (PPID 1) is treated as an orphan."""
+    adapter = _make_adapter(monkeypatch)
+    monkeypatch.setattr(photon_adapter.httpx, "AsyncClient", _ProbeClient)
+    monkeypatch.setattr(adapter, "_find_listener_pids", lambda port: [4242])
+    monkeypatch.setattr(adapter, "_pid_is_sidecar", lambda pid: True)
+    # _sidecar_parent_pid returns None for PPID 1 (init reparented)
+    monkeypatch.setattr(adapter, "_sidecar_parent_pid", lambda pid: None)
+    monkeypatch.setattr(adapter, "_pid_alive", lambda pid: False)
+    kills = _capture_kills(monkeypatch)
+
+    await adapter._reap_stale_sidecar()
+
+    assert kills == [(4242, photon_adapter.signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
 async def test_start_sidecar_spawns_with_stdin_pipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
