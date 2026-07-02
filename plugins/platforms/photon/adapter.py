@@ -778,6 +778,42 @@ class PhotonAdapter(BasePlatformAdapter):
         except OSError:
             return False
 
+    @staticmethod
+    def _sidecar_parent_pid(pid: int) -> Optional[int]:
+        """Return the sidecar's parent PID (PPID), or None if unknown.
+
+        Used to distinguish a true orphan (parent dead — the gateway that
+        spawned it has exited) from a sidecar that belongs to another live
+        gateway instance sharing the same port.  Killing the latter would
+        start a reap-war where each gateway keeps murdering the other's
+        sidecar on every reconnect.
+        """
+        try:
+            out = subprocess.run(  # noqa: S603, S607
+                ["ps", "-p", str(pid), "-o", "ppid="],
+                capture_output=True, text=True, timeout=5.0, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        tok = out.stdout.strip()
+        if not tok.isdigit():
+            return None
+        ppid = int(tok)
+        return ppid if ppid > 1 else None  # 1 = init/reparented → orphan
+
+    def _sidecar_is_orphan(self, pid: int) -> bool:
+        """True when the sidecar's parent process is dead (a true orphan).
+
+        A sidecar reparented to init (PPID 1) is also treated as an orphan —
+        its original parent exited and the OS reparented it.  A sidecar whose
+        parent is still alive belongs to another running gateway and must not
+        be reaped.
+        """
+        ppid = self._sidecar_parent_pid(pid)
+        if ppid is None:
+            return True  # can't determine parent — treat as orphan (backward compat)
+        return not self._pid_alive(ppid)
+
     async def _reap_stale_sidecar(self) -> None:
         """Kill an orphaned sidecar squatting our port before spawning ours.
 
@@ -808,7 +844,20 @@ class PhotonAdapter(BasePlatformAdapter):
                 f"(pids: {foreign or 'unknown'}, not a Photon sidecar) — "
                 f"free it or set PHOTON_SIDECAR_PORT to a different port"
             )
-        for pid in stale:
+        # Only kill sidecars whose parent process is dead (true orphans).
+        # A sidecar with a live parent belongs to another running gateway
+        # instance — killing it would start a reap-war where each gateway
+        # keeps murdering the other's sidecar on every reconnect.
+        orphans = [pid for pid in stale if self._sidecar_is_orphan(pid)]
+        owned = [pid for pid in stale if pid not in orphans]
+        if owned and not orphans:
+            raise RuntimeError(
+                f"port {self._sidecar_port} is held by a Photon sidecar "
+                f"(pids: {owned}) whose parent is still alive — another "
+                f"gateway instance owns it. Set PHOTON_SIDECAR_PORT to a "
+                f"different port for this instance."
+            )
+        for pid in orphans:
             logger.warning(
                 "[photon] reaping orphaned sidecar (pid %d) on port %d",
                 pid, self._sidecar_port,
@@ -818,9 +867,9 @@ class PhotonAdapter(BasePlatformAdapter):
             except OSError:
                 pass
         deadline = time.time() + 3.0
-        while time.time() < deadline and any(self._pid_alive(p) for p in stale):
+        while time.time() < deadline and any(self._pid_alive(p) for p in orphans):
             await asyncio.sleep(0.1)
-        for pid in stale:
+        for pid in orphans:
             if self._pid_alive(pid):
                 try:
                     os.kill(pid, signal.SIGKILL)  # windows-footgun: ok — unreachable on win32 (early return above)
