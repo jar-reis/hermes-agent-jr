@@ -369,6 +369,91 @@ def check_api_server_requirements() -> bool:
     return AIOHTTP_AVAILABLE
 
 
+def ensure_api_server_key(config: PlatformConfig) -> Optional[str]:
+    """Provision a strong ``API_SERVER_KEY`` for a *loopback-only* API server.
+
+    The API server refuses to start without an ``API_SERVER_KEY`` (see the guard
+    in ``APIServerAdapter.connect()``), because it can dispatch terminal-capable
+    agent work and an unauthenticated bind — even on 127.0.0.1 — is an RCE
+    surface. When an operator enables the platform (``API_SERVER_ENABLED`` or a
+    ``platforms.api_server`` config block) but never sets a key, the gateway
+    otherwise wedges into a silent 300s retry loop forever (bd hermes-2gjd:
+    Talaris retried 1117× over 4+ days).
+
+    Provisioning contract — this only self-heals the *safe* case:
+
+    - **Key already resolvable** (``config.extra['key']`` or the ``API_SERVER_KEY``
+      env var, which ``env_loader.load_hermes_dotenv()`` populates from
+      ``~/.hermes/.env`` / Bitwarden / managed-scope) → no-op, return ``None``.
+    - **Network-accessible bind** (``0.0.0.0``, ``::``, a LAN/public address, or a
+      hostname that resolves off-loopback) → do NOT auto-generate. A key minted
+      for a public bind would silently expose terminal-capable RPC; the operator
+      must set one explicitly, so we leave the existing hard refuse-with-guidance
+      in ``connect()`` to fire. Return ``None``.
+    - **Loopback-only bind with no key** → generate ``secrets.token_hex(32)`` (a
+      256-bit secret, well past the 16-char network floor), persist it to
+      ``~/.hermes/.env`` via ``save_env_value()`` (atomic write, chmod 0600, never
+      committed — ``.env`` is in ``.gitignore``), mirror it into
+      ``config.extra['key']`` and ``os.environ`` so the adapter constructed right
+      after this picks it up, and return the key.
+
+    A generated 256-bit loopback secret is exactly as safe as an operator-set one
+    — it satisfies the guard's actual requirement (authentication) without
+    weakening it, and the low-level ``connect()`` refusal stays intact as
+    defense-in-depth (it still fires if this preflight is bypassed).
+
+    Fail-open: any error while generating or persisting is swallowed and logged,
+    so a read-only home / managed-scope pin can never turn a provisioning attempt
+    into a crash — the adapter simply falls through to the existing guard.
+    """
+    extra = config.extra or {}
+    host = extra.get("host") or os.getenv("API_SERVER_HOST") or DEFAULT_HOST
+
+    existing = extra.get("key") or os.getenv("API_SERVER_KEY", "")
+    if existing:
+        return None  # already provisioned (env / .env / config / Bitwarden)
+
+    if is_network_accessible(host):
+        # Public/LAN bind: never silently mint a key — let connect() refuse.
+        return None
+
+    try:
+        import secrets
+
+        key = secrets.token_hex(32)  # 256-bit; matches `openssl rand -hex 32`
+        # Persist to ~/.hermes/.env (gitignored, atomic, 0600) so the key
+        # survives restarts and every future `gateway run` resolves it via
+        # env_loader.load_hermes_dotenv() instead of regenerating.
+        from hermes_cli.config import save_env_value
+
+        save_env_value("API_SERVER_KEY", key)  # also sets os.environ + invalidates cache
+        # Mirror into the platform config so the APIServerAdapter built
+        # immediately after this call reads it from extra['key'] first.
+        if config.extra is None:
+            config.extra = {}
+        config.extra["key"] = key
+        os.environ.setdefault("API_SERVER_KEY", key)
+        logger.warning(
+            "[api_server] No API_SERVER_KEY was configured for the loopback bind "
+            "%s; auto-provisioned a 256-bit key and saved it to ~/.hermes/.env. "
+            "The API server will now start. Retrieve the key from that file (or "
+            "`hermes config get API_SERVER_KEY`) to authenticate local clients.",
+            host,
+        )
+        return key
+    except Exception:
+        # Best-effort: never let provisioning block startup. The adapter's own
+        # connect() guard will still refuse cleanly if the key didn't land.
+        logger.warning(
+            "[api_server] Failed to auto-provision API_SERVER_KEY for loopback "
+            "bind %s; the API server will refuse to start until a key is set "
+            "(e.g. `hermes config set API_SERVER_KEY $(openssl rand -hex 32)`).",
+            host,
+            exc_info=True,
+        )
+        return None
+
+
 class ResponseStore:
     """
     SQLite-backed LRU store for Responses API state.

@@ -7809,10 +7809,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return WeixinAdapter(config)
 
         elif platform == Platform.API_SERVER:
-            from gateway.platforms.api_server import APIServerAdapter, check_api_server_requirements
+            from gateway.platforms.api_server import (
+                APIServerAdapter,
+                check_api_server_requirements,
+                ensure_api_server_key,
+            )
             if not check_api_server_requirements():
                 logger.warning("API Server: aiohttp not installed")
                 return None
+            # Provision an API_SERVER_KEY for loopback-only binds when none is
+            # configured, so an enabled-but-unkeyed api_server self-heals instead
+            # of wedging in a silent 300s retry loop (bd hermes-2gjd). Network
+            # binds are left to connect()'s hard refuse-with-guidance. Runs
+            # BEFORE construction so the adapter reads the key from extra['key'].
+            ensure_api_server_key(config)
             return APIServerAdapter(config)
 
         elif platform == Platform.WEBHOOK:
