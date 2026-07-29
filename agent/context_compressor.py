@@ -19,10 +19,14 @@ Improvements over v2:
 import hashlib
 import json
 import logging
-import sqlite3
+import os
 import re
+import sqlite3
+import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import (
@@ -2346,6 +2350,8 @@ class ContextCompressor(ContextEngine):
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_real_prompt_tokens = 0
+        self._context_snapshot_path: Optional[Path] = None
+        self._context_snapshot_session_id = ""
         self.last_compression_rough_tokens = 0
         self.last_rough_tokens_when_real_prompt_fit = 0
         self.awaiting_real_usage_after_compression = False
@@ -2483,6 +2489,50 @@ class ContextCompressor(ContextEngine):
         # it armed for a later, unrelated reading.
         self._verify_compaction_cleared_threshold = False
         self.awaiting_real_usage_after_compression = False
+        self._publish_context_snapshot()
+
+    def configure_context_snapshot(self, path: str | Path, session_id: str) -> None:
+        """Configure a credential-free, session-bound usage snapshot."""
+        self._context_snapshot_path = Path(path).expanduser()
+        self._context_snapshot_session_id = str(session_id)
+
+    def _publish_context_snapshot(self) -> None:
+        """Atomically publish normalized usage for cron/tool subprocesses."""
+        path = self._context_snapshot_path
+        if path is None:
+            return
+
+        temp_path: Optional[Path] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "last_prompt_tokens": int(self.last_prompt_tokens),
+                "context_length": int(self.context_length),
+                "source": "context_compressor",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session_id": self._context_snapshot_session_id,
+            }
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                json.dump(payload, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        except Exception as exc:
+            logger.debug("Failed to publish context snapshot %s: %s", path, exc)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def snapshot_preflight_display_tokens(self) -> int:
         """Capture the display token count before a speculative preflight seed."""

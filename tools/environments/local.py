@@ -1313,9 +1313,6 @@ def _make_run_env(env: dict) -> dict:
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(run_env)
 
-    # Bridge ContextVar-based session vars into the subprocess env (with the
-    # cross-session leak guard — strips _UNSET vars when a concurrent host is
-    # engaged so a sibling session's os.environ mirror can't leak in).
     _inject_session_context_env(run_env)
 
     for _marker in _ACTIVE_VENV_MARKER_VARS:

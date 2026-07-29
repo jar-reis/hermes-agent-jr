@@ -88,6 +88,7 @@ _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
 # precise return address so a stale/rotated durable session key cannot be
 # consumed by whichever desktop poller wakes first.
 _SESSION_UI_SESSION_ID: ContextVar = ContextVar("HERMES_UI_SESSION_ID", default=_UNSET)
+_CONTEXT_SNAPSHOT: ContextVar = ContextVar("HERMES_CONTEXT_SNAPSHOT", default=_UNSET)
 # ID of the message that triggered the current turn. Used as a reply anchor
 # so background-process notifications stay inside the originating Telegram
 # private-chat topic (those lanes route only with thread id + reply anchor).
@@ -139,6 +140,7 @@ _VAR_MAP = {
     "HERMES_SESSION_KEY": _SESSION_KEY,
     "HERMES_SESSION_ID": _SESSION_ID,
     "HERMES_UI_SESSION_ID": _SESSION_UI_SESSION_ID,
+    "HERMES_CONTEXT_SNAPSHOT": _CONTEXT_SNAPSHOT,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
     "HERMES_CRON_SESSION": _CRON_SESSION,
@@ -214,6 +216,7 @@ def set_session_vars(
     user_name: str = "",
     session_key: str = "",
     session_id: str = "",
+    context_snapshot: str = "",
     message_id: str = "",
     profile: str = "",
     cwd: str = "",
@@ -257,6 +260,7 @@ def set_session_vars(
         _SESSION_KEY.set(session_key),
         _SESSION_ID.set(session_id),
         _SESSION_UI_SESSION_ID.set(ui_session_id),
+        _CONTEXT_SNAPSHOT.set(context_snapshot),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_PROFILE.set(profile),
         _CRON_SESSION.set(cron_session),
@@ -294,6 +298,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_KEY,
         _SESSION_ID,
         _SESSION_UI_SESSION_ID,
+        _CONTEXT_SNAPSHOT,
         _SESSION_MESSAGE_ID,
         _SESSION_PROFILE,
         _CRON_SESSION,
