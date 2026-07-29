@@ -59,6 +59,33 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
+class _ConnectionOpenedNoiseFilter(logging.Filter):
+    """Suppress noisy MCP SDK warnings for the non-standard connection/opened notification.
+
+    Some MCP clients (e.g. Claude Code) emit a ``connection/opened`` lifecycle
+    notification after stdio transport establishment. The Python MCP SDK's
+    ``ClientNotification`` union does not include that method, so
+    ``mcp.shared.session.BaseSession._receive_loop`` tries to validate the
+    message against every known notification type and logs a warning for each
+    failed attempt. The warnings are harmless but spam stderr on every
+    connection. This filter drops only those specific warnings.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "mcp.shared.session":
+            return True
+        msg = record.getMessage()
+        return not (
+            "Failed to validate notification" in msg
+            and "connection/opened" in msg
+        )
+
+
+def _suppress_connection_opened_warnings() -> None:
+    """Install the connection/opened noise filter on the MCP session logger."""
+    logging.getLogger("mcp.shared.session").addFilter(_ConnectionOpenedNoiseFilter())
+
+
 def _get_sessions_dir() -> Path:
     """Return the sessions directory using HERMES_HOME."""
     try:
@@ -884,6 +911,8 @@ def run_mcp_server(verbose: bool = False) -> None:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
     else:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+
+    _suppress_connection_opened_warnings()
 
     bridge = EventBridge()
     bridge.start()
