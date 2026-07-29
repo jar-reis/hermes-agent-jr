@@ -1,7 +1,7 @@
 ---
 name: antigravity-cli
 description: "Operate the Antigravity CLI (agy): plugins, auth, sandbox."
-version: 0.2.0
+version: 0.1.0
 author: Tony Simons (asimons81), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -62,66 +62,6 @@ skills use. For one-shot smoke tests and scripted prompts, prefer
 
 To inspect Antigravity's own files, use `read_file` on the paths under Core
 paths below — do not `cat` them through the terminal.
-
-## Delegation patterns
-
-`agy` is a coding-agent backend in the same family as `codex` / `claude-code`,
-so the same delegation shapes apply. Use these when handing real work (features,
-fixes, reviews, second opinions) to Antigravity rather than just smoke-testing.
-
-### One-shot (preferred for scripted prompts and second opinions)
-
-```
-terminal(command="agy -p 'Review this diff for bugs and security issues' --model 'Gemini 3.1 Pro (High)'", workdir="/path/to/repo", timeout=300)
-```
-
-`-p` is non-interactive: it runs the prompt and exits. Pick the engine with
-`--model` (run `agy models` for the exact display strings, e.g.
-`'Gemini 3.1 Pro (High)'`, `'Claude Opus 4.6 (Thinking)'`). Add extra context
-roots with repeatable `--add-dir`.
-
-### Long / bounded runs (tests, builds, multi-file changes)
-
-Background it and get notified on completion, the same as the `codex` skill:
-
-```
-terminal(command="agy -p 'Implement the change described in TASK.md and run the tests' --dangerously-skip-permissions", workdir="/path/to/repo", background=true, notify_on_complete=true)
-# then: process(action="poll"/"log"/"wait", session_id=<id>)
-```
-
-### Interactive multi-turn (PTY + tmux)
-
-For a conversational session, launch `agy -i` (or bare `agy`) under `pty=true`
-with tmux for `capture-pane` / `send-keys`, exactly the pattern documented in
-the `codex` / `claude-code` skills. Resume later with `--continue` / `-c` or a
-specific `--conversation <id>`.
-
-### Parallel instances (batch sub-issue / worktree fan-out)
-
-Create one git worktree per task and launch an independent `agy -p` in each
-(background), then collect results — same worktree fan-out the `codex` skill
-uses for batch issue fixing. Bound concurrency to what the machine and your
-review capacity can absorb.
-
-### Output + bounding caveat (differs from Claude Code)
-
-- `agy -p` returns **plain text** — there is **no `--output-format json`** and
-  no result envelope with `session_id` / cost / turn count. Parse stdout
-  directly; don't expect a JSON object.
-- There is **no `--max-turns`**. A print run is bounded by **`--print-timeout`**
-  (default `5m`). Raise it for long tasks: `--print-timeout 20m`. Pair with the
-  `terminal` `timeout=` so the outer call doesn't cut the run short.
-
-### Orchestration boundary
-
-Antigravity is a **worker execution backend or third-opinion reviewer** — an
-execution detail owned by the agent/profile running a task, NOT a first-class
-orchestration primitive. Do not put `agy` on a kanban board as its own card or
-treat it as a coordination layer; route work through the normal task graph and
-let the assigned worker choose `agy` (vs. codex/claude-code/direct tools) as its
-method. Reach for it explicitly only when the user asks, when a worker is
-configured to wrap it, or when you want a Gemini-family cross-check against
-another agent's plan or diff.
 
 ## Core paths
 
@@ -198,6 +138,19 @@ another agent's plan or diff.
   and expects the auth code pasted back.
 - `/logout` removes saved credentials.
 
+### Session-scoped auth and Herdr reuse
+
+A fresh SSH-launched `agy models` can report signed out while a long-lived authenticated Agy TUI continues refreshing models with in-memory OAuth state. Before asking the user to sign in again:
+
+1. Inspect `pgrep -fl '(^|/)agy|antigravity'` and safe auth lines in the latest CLI log.
+2. Run `herdr agent list` and locate the registered `agy` pane.
+3. Read it with `herdr agent read agy --source visible --lines 40 --format text`.
+4. Route prompts through `herdr agent send` and `herdr pane send-keys`; never copy keyring/token material or write directly to the TTY.
+5. Explicitly select and read back the model with `/model EXACT DISPLAY NAME`. The picker may require one additional `enter` to confirm.
+6. For multiline prompts, verify the agent transitions to `working`; if text remains in the editor, send one additional `enter`, not repeated blind keystrokes.
+
+Use the `herdr-agy-adjudication` skill for the complete review-and-receipt workflow.
+
 ## Plugins
 
 - Plugins stage under `~/.gemini/antigravity-cli/plugins/<plugin_name>/`.
@@ -206,21 +159,69 @@ another agent's plan or diff.
 
 ## Pitfalls
 
+- **Inline `--print` prompts break under tmux send-keys.** When launching agy in a tmux session via `tmux send-keys`, inlining a long prompt as `agy --print "$(cat file.md)"` or `agy --print 'multi-line text...'` gets mangled by shell quoting — backticks, `$()`, apostrophes, and markdown code fences all break. The tmux pane shows `cmdand dquote>` continuation prompts and parse errors.
+  **Fix:** Write the prompt to a temp file, then pipe via stdin:
+  ```
+  write_file(path="/tmp/agy-prompt.md", content="...full prompt...")
+  tmux send-keys -t session 'cd /project && cat /tmp/agy-prompt.md | agy --print-timeout 600s --print --allowedTools "Read,Bash,Write" 2>&1 | tee /tmp/agy-output.txt' Enter
+  ```
+  This sidesteps all shell quoting. Same pattern as Claude Code's `cat file | claude -p`.
 - `agy help` shows wrapper commands, not interactive slash commands.
 - `agy --version` is the safe non-interactive version check; `agy version` is
   interactive and can fail without a real TTY.
 - First place to look for failures: `~/.gemini/antigravity-cli/log/cli-*.log`
   (read with `read_file`).
+- Startup logs can show `error getting token source: You are not logged into
+  Antigravity` before silent keyring auth completes. Do **not** call that an
+  auth/model-access outage if the same run later shows `ChainedAuth:
+  authenticated via keyring`, `OAuth: authenticated successfully`,
+  `fetchAvailableModels`, or `streamGenerateContent`.
+- For model-access smoke tests, use a clean temp workspace rather than `/tmp` or
+  a long-lived project: `d=$(mktemp -d /tmp/agy-smoke-XXXXXX); cd "$d"; agy
+  --print-timeout 60s --model 'Gemini 3.5 Flash (High)' --print 'Do not inspect
+  files. Reply exactly: AGY_OK'`.
+- **Treat an off-prompt `--print` response as session/workspace contamination, even when exit code is 0.** Before granting write tools, run from a fresh temp workspace with a unique nonce and require the response to echo that nonce. If the output discusses unrelated files, commits, or prior tasks, exclude it from evidence, verify any claimed side effects independently, and restart from a fresh workspace/conversation. Do not let a contaminated run modify the target repository.
+- Do **not** assume a named fleet agent is Antigravity/Agy just because the
+  symptom mentions model access. First verify the identity mapping from the
+  fleet source of truth. Example: Jack corrected that **Aegis is the Mac mini
+  Hermes agent**, not the local Paperclip Antigravity/Agy lane.
+- **Model names are display strings with spaces and parentheses, not slugs.**
+  `--model gemini-3.1-pro` fails with "model not recognized." The correct form
+  is `--model "Gemini 3.1 Pro (High)"` (case-sensitive, with quotes). Run
+  `agy models` (or trigger an invalid model name) to list available models and
+  their exact display strings. Known models as of 2026-07-14:
+  `Gemini 3.5 Flash (Medium|High|Low)`, `Gemini 3.1 Pro (Low|High)`,
+  `Claude Sonnet 4.6 (Thinking)`, `Claude Opus 4.6 (Thinking)`,
+  `GPT-OSS 120B (Medium)`.
+- **Do not use `--mode plan` when exact boundary markers are part of the output
+  protocol.** Antigravity 1.1.2 prefixes the submitted prompt with `/plan` in
+  this mode and can append `/plan` to an otherwise exact nonce, breaking strict
+  marker parsing. For a read-only bridge, prefer a dedicated empty workspace
+  with `--sandbox --model "Gemini 3.1 Pro (High)"` in the default
+  request-review mode; never send approval keystrokes, and fail closed on any
+  tool/trust/permission modal.
+- **Plugins can hijack `--print` sessions and produce off-prompt output.** The
+  `mandates-loader` plugin (and similar skill-injecting plugins) intercept the
+  prompt before the model sees it, causing `agy -p` to write daily notes, commit
+  to git, and run permission checks instead of answering the actual question.
+  The exit code is 0 and the output looks "successful" but it's contaminated —
+  the architect query was never answered.
+  **Fix:** Disable plugins before running one-shot architect/review queries:
+  ```
+  agy plugin disable mandates-loader
+  agy -p --dangerously-skip-permissions --model "Gemini 3.1 Pro (High)" "prompt"
+  agy plugin enable mandates-loader
+  ```
+  Re-enable after. The disable/enable cycle is safe and non-destructive.
+  This is distinct from the existing "workspace contamination" pitfall —
+  that was about prior session state; this is about active plugin
+  interception of the prompt itself.
 - Don't confuse persistent JSON settings with launch-time overrides.
 - `~/.gemini/antigravity-cli/bin/agentapi` is a thin wrapper to `agy agentapi`.
 - On WSL, token storage is file-based, so auth issues are usually local-file /
   session-state problems, not browser-only problems.
 - Workspace identity can depend on launch directory and the `.antigravitycli`
   project marker.
-- `agy -p` prints plain text only — no `--output-format json`, no result
-  envelope. Don't try to parse a JSON object out of it (unlike `claude-code`).
-- Bound print runs with `--print-timeout` (default `5m`), not `--max-turns`
-  (which does not exist on `agy`).
 
 ## Verification
 

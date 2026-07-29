@@ -11,6 +11,7 @@ Three layers of tests:
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -975,6 +976,47 @@ class TestRunMcpServer:
         with pytest.raises(SystemExit) as exc_info:
             mcp_serve.run_mcp_server()
         assert exc_info.value.code == 1
+
+
+class TestConnectionOpenedNoiseFilter:
+    def test_suppresses_connection_opened_warning(self):
+        import mcp_serve
+        record = logging.LogRecord(
+            name="mcp.shared.session",
+            level=logging.WARNING,
+            pathname="",
+            lineno=0,
+            msg="Failed to validate notification: %s",
+            args=("method='connection/opened' params=None jsonrpc='2.0'",),
+            exc_info=None,
+        )
+        assert not mcp_serve._ConnectionOpenedNoiseFilter().filter(record)
+
+    def test_preserves_other_session_warnings(self):
+        import mcp_serve
+        record = logging.LogRecord(
+            name="mcp.shared.session",
+            level=logging.WARNING,
+            pathname="",
+            lineno=0,
+            msg="Some other session warning",
+            args=(),
+            exc_info=None,
+        )
+        assert mcp_serve._ConnectionOpenedNoiseFilter().filter(record)
+
+    def test_preserves_warnings_from_other_loggers(self):
+        import mcp_serve
+        record = logging.LogRecord(
+            name="some.other.logger",
+            level=logging.WARNING,
+            pathname="",
+            lineno=0,
+            msg="Failed to validate notification: connection/opened",
+            args=(),
+            exc_info=None,
+        )
+        assert mcp_serve._ConnectionOpenedNoiseFilter().filter(record)
 
 
 class TestCliIntegration:

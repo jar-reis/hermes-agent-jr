@@ -632,8 +632,13 @@ def _make_run_env(env: dict) -> dict:
         from gateway.session_context import _UNSET, _VAR_MAP
         for var_name, var in _VAR_MAP.items():
             value = var.get()
-            if value is not _UNSET and value:
-                run_env[var_name] = value
+            if value is not _UNSET:
+                if value:
+                    run_env[var_name] = value
+                else:
+                    # An explicitly cleared task-local value suppresses any
+                    # stale process-global fallback for this subprocess.
+                    run_env.pop(var_name, None)
     except Exception:
         pass
 
