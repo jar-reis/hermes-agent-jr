@@ -42,7 +42,10 @@ def test_cleared_snapshot_context_suppresses_stale_process_env(monkeypatch):
     tokens = set_session_vars(session_id="", context_snapshot="")
     try:
         env = _make_run_env({})
-        assert "HERMES_CONTEXT_SNAPSHOT" not in env
-        assert "HERMES_SESSION_ID" not in env
+        # Explicitly-cleared ContextVars override stale process-global values:
+        # the subprocess env carries an empty string (not the stale path),
+        # so the subprocess can't inherit a foreign session's snapshot.
+        assert env.get("HERMES_CONTEXT_SNAPSHOT") == ""
+        assert env.get("HERMES_SESSION_ID") == ""
     finally:
         clear_session_vars(tokens)
