@@ -595,11 +595,20 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
     display_name = entry.get("name", "") or name
     api_url = entry.get("api", "") or entry.get("url", "") or entry.get("base_url", "") or ""
     key_env = entry.get("key_env", "") or ""
-    transport = entry.get("transport", "openai_chat") or "openai_chat"
+    transport = entry.get("transport") or entry.get("api_mode") or "openai_chat"
 
     env_vars: List[str] = []
     if key_env:
         env_vars.append(key_env)
+
+    # If the user config doesn't specify explicit env vars, fall back to the
+    # built-in provider definition (e.g. anthropic -> ANTHROPIC_API_KEY) so
+    # credential lookup and runtime resolution still work for overridden
+    # built-in providers.
+    if not env_vars:
+        builtin = get_provider(name)
+        if builtin is not None and builtin.api_key_env_vars:
+            env_vars.extend(builtin.api_key_env_vars)
 
     return ProviderDef(
         id=name,
