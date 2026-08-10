@@ -876,15 +876,12 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
             or "127.0.0.1" in resolved_base_url
             or "::1" in resolved_base_url
         )
-        if _is_local:
-            # Check if the host block has its own apiKey (explicit local auth).
-            # Auth-skipping is loopback-only: a stored key is likely a cloud key
-            # that would break a no-auth local server, so we substitute the SDK's
-            # required-non-empty placeholder unless the host block opts in.
-            _raw = config.raw or {}
-            _host_block = (_raw.get("hosts") or {}).get(config.host, {})
-            _host_has_key = bool(_host_block.get("apiKey"))
-            effective_api_key = config.api_key if _host_has_key else "local"
+        # For loopback deployments, keep any explicitly resolved api_key from env
+        # / config (including inherited/global values) so cloud API keys are
+        # not silently replaced. Use "local" only when no usable key is
+        # available, which is the only case the SDK accepts a placeholder.
+        if _is_local and not config.api_key:
+            effective_api_key = "local"
         else:
             effective_api_key = config.api_key
 
