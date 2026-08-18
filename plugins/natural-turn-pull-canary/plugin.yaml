@@ -1,0 +1,6 @@
+name: natural-turn-pull-canary
+version: "0.1.0"
+description: "Hermes natural-turn pull canary — reads the fleet-beacon/v1 beacon at each genuine turn boundary and acknowledges section digests. Never creates a turn or breaks prompt caching. Captures baseline and post-canary prompt measurements for rollback analysis."
+author: "Aegis (100915f9) / JAC-3632"
+hooks:
+  - pre_llm_call
